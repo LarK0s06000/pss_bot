@@ -2,6 +2,7 @@ import os, re, sys, json, requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -48,24 +49,38 @@ def lire(page):
     r = requests.get(page, headers=H, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
-    lignes = []
-    for tr in soup.select("table tr"):
+    lignes, vus = [], set()
+    for a in soup.find_all("a", href=re.compile(r"immeubles/[A-Z]{2}-")):
+        tr = a.find_parent("tr")
+        if tr is None:
+            continue
+        url = urljoin(page, a["href"])
+        if url in vus:
+            continue
+        texte = tr.get_text(" ", strip=True)
+        m = re.search(r"\((\d{5})\)", texte)
+        if not m:
+            continue
+        vus.add(url)
         tds = tr.find_all("td")
-        if len(tds) < 4:
-            continue
-        lien = tds[0].find("a", href=re.compile(r"/immeubles/"))
-        m = re.search(r"\((\d{5})\)", tds[1].get_text())
-        if not lien or not m:
-            continue
         img = tr.find("img", src=re.compile(r"ic_"))
-        url = lien["href"] if lien["href"].startswith("http") else BASE + lien["href"]
+        ville = ""
+        if len(tds) > 1:
+            ville = re.sub(r"\s*,\s*France\s*$", "", tds[1].get_text(" ", strip=True))
         lignes.append({
-            "url": url, "nom": lien.get_text(strip=True),
-            "ville": re.sub(r"\s*,\s*France\s*$", "", tds[1].get_text(" ", strip=True)),
+            "url": url,
+            "nom": a.get_text(strip=True),
+            "ville": ville,
             "cp": m.group(1),
             "icone": img["src"].split("/")[-1] if img else None,
-            "date": date_iso(tds[-1].get_text()),
+            "date": date_iso(tds[-1].get_text()) if tds else "",
         })
+    if not lignes:
+        print("DEBUG : aucune ligne reconnue sur", page)
+        print("Taille de la page :", len(r.text))
+        print("Début de la page :", r.text[:800])
+        tr = soup.find("tr")
+        print("Première ligne de tableau :", str(tr)[:800] if tr else "aucun <tr>")
     return lignes
 
 
