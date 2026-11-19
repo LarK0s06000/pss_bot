@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-BASE = "[pss-archi.eu](https://www.pss-archi.eu)"
+BASE = "https://www.pss-archi.eu"
 PAGE_NOUVEAUX = BASE + "/nouveaux_immeubles.html"
 PAGE_MODIFS = BASE + "/dernieres_modifications.html"
 ETAT = "state.json"
