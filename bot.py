@@ -13,14 +13,17 @@ PAGE_MODIFS = BASE + "/dernieres_modifications.html"
 ETAT = "state.json"
 
 # icône -> statut. ic_projetr = projet retenu (à confirmer au calibrage)
-ICONES = {
-    "ic_projetr.gif": "Projet retenu",
-    # "ic_xxxx.gif": "Projet proposé",
-    # "ic_xxxx.gif": "En construction",
-    # "ic_xxxx.gif": "En rénovation",
-}
-IGNORER = set()  # ex. {"ic_construit.gif", "ic_annule.gif"}
 
+IGNORER = {"ic_construit.gif", "ic_annule.gif", "ic_detruit.gif"}
+ICONES = {
+    "ic_construit.gif": "Construit",
+    "ic_renov.gif": "En rénovation",
+    "ic_projetr.gif": "Projet retenu",
+    "ic_construction.gif": "En construction",
+    "ic_projetp.gif": "Projet proposé",
+    "ic_annule.gif": "Annulé",
+    "ic_detruit.gif": "Détruit",
+}
 EMOJI = {"Projet retenu": "✅", "Projet proposé": "💡",
          "En construction": "🏗️", "En rénovation": "🛠️"}
 H = {"User-Agent": "Mozilla/5.0 (veille personnelle)"}
