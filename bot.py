@@ -94,7 +94,7 @@ def statut(l):
 
 
 def telegram(txt):
-    requests.post(f"[api.telegram.org](https://api.telegram.org/bot{TOKEN}/sendMessage)",
+    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                   data={"chat_id": CHAT_ID, "text": txt}, timeout=20).raise_for_status()
 
 
