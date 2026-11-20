@@ -1,4 +1,4 @@
-import os, re, sys, json, html, requests
+import os, re, sys, json, html, time, csv, unicodedata, requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
@@ -357,6 +357,251 @@ def telegram(txt):
 
 
 # ---------------------------------------------------------------------------
+# Liste des projets : commande Telegram /projets  ou  python bot.py --liste
+# ---------------------------------------------------------------------------
+# Listes PSS par statut : 1 = en construction, 2 = projet retenu
+LISTES = [
+    ("Alpes-Maritimes (06)", BASE + "/immeubles/FR/3-6/{code}/1", ""),
+    ("Monaco (98000)", BASE + "/immeubles/MC/5-98000/{code}/1", "Monaco (98000)"),
+]
+CODES_STATUT = {"1": "En construction", "2": "Projet retenu"}
+ORDRE_STATUT = {"En construction": 0, "Projet retenu": 1}
+AIDE = ("Commandes :\n"
+        "/projets : tous les projets en construction et retenus (06 + Monaco)\n"
+        "/projets retenu  ou  /projets construction\n"
+        "/projets nice  (ou cannes, monaco, logements, hôtel...) : filtre libre\n"
+        "Tri : annee (livraison la plus proche), surface, hauteur, nom, ville\n"
+        "Exemple : /projets retenu monaco surface")
+
+
+def norm(s):
+    t = unicodedata.normalize("NFD", str(s).lower())
+    return "".join(c for c in t if unicodedata.category(c) != "Mn")
+
+
+def soup_de(url):
+    r = requests.get(url, headers=H, timeout=30)
+    r.raise_for_status()
+    return BeautifulSoup(r.text, "html.parser")
+
+
+def nombre(txt):
+    t = re.sub(r"[\s\u00a0\u202f]", "", txt or "")
+    m = re.search(r"\d+(?:[.,]\d+)?", t)
+    return float(m.group(0).replace(",", ".")) if m else None
+
+
+def lignes_tableau(soup, zone, ville_defaut, statut):
+    sortie = []
+    for table in soup.find_all("table"):
+        premiere = table.find("tr")
+        if premiere is None:
+            continue
+        entetes = [norm(c.get_text(" ", strip=True)) for c in premiere.find_all(["th", "td"])]
+
+        def col(mot):
+            return next((i for i, h in enumerate(entetes) if mot in h), None)
+
+        for tr in table.find_all("tr"):
+            lien = next((a for a in tr.find_all("a", href=True)
+                         if re.search(r"/immeubles/[A-Z]{2}-", a["href"])), None)
+            if lien is None:
+                continue
+            cellules = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+
+            def val(mot):
+                i = col(mot)
+                return cellules[i] if i is not None and i < len(cellules) else ""
+
+            sortie.append({
+                "statut": statut, "zone": zone,
+                "nom": lien.get_text(" ", strip=True),
+                "url": urljoin(BASE, lien["href"]),
+                "ville": val("ville") or ville_defaut,
+                "fonction": val("fonction"), "surface": val("surface"),
+                "hauteur": val("hauteur"), "annee": val("annee"),
+            })
+    return sortie
+
+
+def lire_liste(url, zone, ville_defaut, statut):
+    base = url.rsplit("/", 1)[0]
+    soup = soup_de(url)
+    lignes = lignes_tableau(soup, zone, ville_defaut, statut)
+    derniere = 1
+    for a in soup.find_all("a", href=True):
+        h = urljoin(url, a["href"])
+        if h.startswith(base + "/") and h[len(base) + 1:].isdigit():
+            derniere = max(derniere, int(h[len(base) + 1:]))
+    for page in range(2, min(derniere, 40) + 1):
+        time.sleep(1)
+        lignes += lignes_tableau(soup_de(f"{base}/{page}"), zone, ville_defaut, statut)
+    return lignes
+
+
+def recuperer_projets(codes):
+    projets, erreurs, vus = [], [], set()
+    for zone, modele, ville_defaut in LISTES:
+        for code in codes:
+            try:
+                for p in lire_liste(modele.format(code=code), zone, ville_defaut, CODES_STATUT[code]):
+                    if p["url"] not in vus:
+                        vus.add(p["url"])
+                        projets.append(p)
+            except Exception as exc:
+                erreurs.append(f"{zone} / {CODES_STATUT[code]} : {exc}")
+            time.sleep(1)
+    return projets, erreurs
+
+
+def parser_demande(texte):
+    codes, filtres, tri = set(), [], None
+    for mot in re.split(r"[\s,;]+", norm(texte)):
+        if not mot or mot.startswith("/") or mot in ("projet", "projets", "liste", "de", "les", "en"):
+            continue
+        if mot in ("construction", "chantier", "travaux"):
+            codes.add("1")
+        elif mot in ("retenu", "retenus"):
+            codes.add("2")
+        elif mot in ("annee", "livraison", "date"):
+            tri = "annee"
+        elif mot in ("surface", "hauteur", "nom", "ville", "statut"):
+            tri = mot
+        else:
+            filtres.append(mot)
+    return (sorted(codes) or ["1", "2"]), filtres, tri
+
+
+def filtrer(projets, filtres):
+    def ok(p):
+        champs = norm(" ".join((p["ville"], p["nom"], p["fonction"], p["zone"])))
+        return all(f in champs for f in filtres)
+    return [p for p in projets if ok(p)]
+
+
+def trier(projets, tri):
+    def vide_dernier(v, desc=False):
+        return (v is None, -(v or 0) if desc else (v or 0))
+    cles = {
+        "annee": lambda p: (*vide_dernier(nombre(p["annee"])), norm(p["ville"]), norm(p["nom"])),
+        "surface": lambda p: (*vide_dernier(nombre(p["surface"]), True), norm(p["nom"])),
+        "hauteur": lambda p: (*vide_dernier(nombre(p["hauteur"]), True), norm(p["nom"])),
+        "nom": lambda p: norm(p["nom"]),
+        "ville": lambda p: (norm(p["ville"]), ORDRE_STATUT[p["statut"]],
+                            *vide_dernier(nombre(p["annee"])), norm(p["nom"])),
+    }
+    defaut = lambda p: (ORDRE_STATUT[p["statut"]], norm(p["ville"]),
+                        *vide_dernier(nombre(p["annee"])), norm(p["nom"]))
+    return sorted(projets, key=cles.get(tri, defaut))
+
+
+def exporter(projets, base_nom):
+    colonnes = ["Statut", "Nom", "Ville", "Fonction(s)", "Surface", "Hauteur", "Année", "Lien"]
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Projets"
+        ws.append(colonnes)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        for p in projets:
+            ws.append([p["statut"], p["nom"], p["ville"], p["fonction"], p["surface"],
+                       p["hauteur"], p["annee"], "Ouvrir la fiche"])
+            cellule = ws.cell(row=ws.max_row, column=8)
+            cellule.hyperlink = p["url"]
+            cellule.style = "Hyperlink"
+        for lettre, largeur in zip("ABCDEFGH", (16, 42, 24, 34, 12, 12, 8, 16)):
+            ws.column_dimensions[lettre].width = largeur
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        chemin = base_nom + ".xlsx"
+        wb.save(chemin)
+        return chemin
+    except ImportError:
+        chemin = base_nom + ".csv"
+        with open(chemin, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(colonnes)
+            for p in projets:
+                w.writerow([p["statut"], p["nom"], p["ville"], p["fonction"], p["surface"],
+                            p["hauteur"], p["annee"], p["url"]])
+        return chemin
+
+
+def message_resume(projets, filtres, tri, erreurs):
+    lignes = ["📋 <b>Projets en construction / retenus</b> (06 + Monaco)"]
+    for statut, emoji in (("En construction", "🏗️"), ("Projet retenu", "✅")):
+        sous = [p for p in projets if p["statut"] == statut]
+        if sous:
+            detail = ", ".join(f"{z.split(' (')[0]} : {sum(1 for p in sous if p['zone'] == z)}"
+                               for z, _, _ in LISTES if any(p["zone"] == z for p in sous))
+            lignes.append(f"{emoji} {statut} : {len(sous)} ({detail})")
+    lignes.append("Filtre : " + (esc(" + ".join(filtres)) if filtres else "aucun"))
+    lignes.append("Tri : " + {"annee": "livraison la plus proche", "surface": "plus grande surface",
+                              "hauteur": "plus haut", "nom": "nom", "ville": "ville"}.get(
+                                  tri, "statut, ville, année"))
+    lignes.append("")
+    for p in projets[:10]:
+        an = f" ({esc(p['annee'])})" if p["annee"] and p["annee"] != "‐" else ""
+        lignes.append(f"• {esc(p['nom'])} — {esc(p['ville'])}{an}")
+    if len(projets) > 10:
+        lignes.append(f"… et {len(projets) - 10} autres dans le fichier.")
+    for e_ in erreurs:
+        lignes.append("⚠️ " + esc(e_))
+    return "\n".join(lignes)
+
+
+def envoyer_fichier(chemin, legende):
+    with open(chemin, "rb") as f:
+        api("sendDocument", {"chat_id": CHAT_ID, "caption": legende},
+            {"document": (os.path.basename(chemin), f)})
+
+
+def commande_liste(texte):
+    codes, filtres, tri = parser_demande(texte)
+    api("sendMessage", {"chat_id": CHAT_ID, "text": "⏳ Je prépare la liste, quelques instants…"})
+    projets, erreurs = recuperer_projets(codes)
+    projets = trier(filtrer(projets, filtres), tri)
+    if not projets:
+        api("sendMessage", {"chat_id": CHAT_ID,
+                            "text": "Aucun projet ne correspond." + ("".join("\n⚠️ " + x for x in erreurs))})
+        return
+    api("sendMessage", {"chat_id": CHAT_ID, "parse_mode": "HTML",
+                        "text": message_resume(projets, filtres, tri, erreurs),
+                        "disable_web_page_preview": "true"})
+    chemin = exporter(projets, "projets_06_98000")
+    envoyer_fichier(chemin, f"{len(projets)} projets, tableau triable et filtrable")
+
+
+def commandes_telegram(etat):
+    """Répond aux messages /projets et /aide reçus depuis le dernier passage."""
+    if not TOKEN:
+        return
+    reponse = api("getUpdates", {"offset": etat.get("tg_offset", 0), "timeout": 0,
+                                 "allowed_updates": json.dumps(["message"])}).json()
+    for maj in reponse.get("result", []):
+        etat["tg_offset"] = maj["update_id"] + 1
+        msg = maj.get("message") or {}
+        if str(msg.get("chat", {}).get("id")) != str(CHAT_ID):
+            continue  # on ne répond qu'à vous
+        texte = (msg.get("text") or "").strip()
+        bas = texte.lower()
+        try:
+            if bas.startswith("/projets") or bas.startswith("/liste"):
+                commande_liste(texte)
+            elif bas.startswith("/aide") or bas.startswith("/start"):
+                api("sendMessage", {"chat_id": CHAT_ID, "text": AIDE})
+        except Exception as exc:
+            print("Commande en échec :", texte, exc)
+            try:
+                api("sendMessage", {"chat_id": CHAT_ID, "text": f"La commande a échoué : {exc}"})
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
 def calibrer():
@@ -391,6 +636,10 @@ def main():
     etat = json.load(open(ETAT)) if not premier else {"nouveaux": [], "modifs": []}
     nouveaux, modifs = set(etat["nouveaux"]), set(etat["modifs"])
     ajoutes = set()
+    try:
+        commandes_telegram(etat)
+    except Exception as exc:  # une commande ne doit jamais bloquer la veille
+        print("Commandes Telegram ignorées :", exc)
 
     for l in lire(PAGE_NOUVEAUX):
         if not code_ok(l["cp"]) or l["url"] in nouveaux:
@@ -411,7 +660,8 @@ def main():
             alerte("✏️ PROJET MODIFIÉ", l, st, modif=True)
 
     # on garde une mémoire bornée
-    etat = {"nouveaux": sorted(nouveaux)[-3000:], "modifs": sorted(modifs)[-3000:]}
+    etat = {"nouveaux": sorted(nouveaux)[-3000:], "modifs": sorted(modifs)[-3000:],
+            "tg_offset": etat.get("tg_offset", 0)}
     json.dump(etat, open(ETAT, "w"), indent=0)
     if premier:
         telegram("✅ Bot PSS installé, la surveillance démarre.")
@@ -420,6 +670,8 @@ def main():
 if __name__ == "__main__":
     if "--calibrer" in sys.argv:
         calibrer()
+    elif "--liste" in sys.argv:
+        commande_liste(" ".join(sys.argv[sys.argv.index("--liste") + 1:]))
     elif "--apercu" in sys.argv:
         apercu(sys.argv[sys.argv.index("--apercu") + 1], "--envoyer" in sys.argv)
     else:
