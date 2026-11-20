@@ -208,7 +208,10 @@ def lire_fiche(url):
 
     h1 = soup.find("h1")
     d["nom"] = h1.get_text(" ", strip=True) if h1 else ""
-    lien_ville = soup.find("a", href=re.compile(r"/villes/"))
+    marqueur = soup.find(string=re.compile(r"Identifiant PSS"))
+    lien_ville = marqueur.find_next("a", href=re.compile(r"/villes/")) if marqueur else None
+    if lien_ville is None:
+        lien_ville = soup.find("a", href=re.compile(r"/villes/"))
     d["ville"] = lien_ville.get_text(" ", strip=True) if lien_ville else ""
     lien_agence = soup.find("a", href=re.compile(r"/agence/\d+"))
     d["agence_url"] = urljoin(BASE, lien_agence["href"]) if lien_agence else ""
@@ -278,9 +281,15 @@ def construire_boutons(l, d, modif):
     # Raccourcis de recherche pour trouver le bureau d'études (BET)
     nom = l["nom"].replace('"', "")
     ville = re.sub(r"\s*\(\d{5}\)", "", l.get("ville", "")).strip()
+    agence = ""
+    if d and d.get("architectes"):
+        agence = d["architectes"].split(" (")[0].split(" ; ")[0].strip().replace('"', "")
+    requete_bet = f'"{nom}" {ville}'
+    if agence:
+        requete_bet += f' "{agence}"'
+    requete_bet += ' ("BET fluides" OR "bureau d\'études")'
     lignes.append([
-        {"text": "🔎 Chercher le BET",
-         "url": recherche(f'"{nom}" {ville} "BET fluides" OR "bureau d\'études"')},
+        {"text": "🔎 Chercher le BET", "url": recherche(requete_bet)},
         {"text": "🏛️ Marchés publics",
          "url": recherche(f'"{nom}" {ville} site:boamp.fr')},
     ])
