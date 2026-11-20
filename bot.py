@@ -2,7 +2,7 @@ import os, re, sys, json, html, requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote_plus
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -206,6 +206,13 @@ def lire_fiche(url):
                              if len(l) > 50 and not l.startswith("Permis de construire n")
                              and "Aucune photo" not in l), "")
 
+    h1 = soup.find("h1")
+    d["nom"] = h1.get_text(" ", strip=True) if h1 else ""
+    lien_ville = soup.find("a", href=re.compile(r"/villes/"))
+    d["ville"] = lien_ville.get_text(" ", strip=True) if lien_ville else ""
+    lien_agence = soup.find("a", href=re.compile(r"/agence/\d+"))
+    d["agence_url"] = urljoin(BASE, lien_agence["href"]) if lien_agence else ""
+
     d["photos"] = photos_fiche(soup)[:MAX_PHOTOS]
     d["credit"] = ", ".join(sorted({p[2] for p in d["photos"] if p[2]}))
     return d
@@ -250,13 +257,33 @@ def construire_texte(titre, l, st, d):
     return texte
 
 
+def recherche(requete):
+    return "https://www.google.com/search?q=" + quote_plus(requete)
+
+
 def construire_boutons(l, d, modif):
     ligne1 = [{"text": "📄 Ouvrir la fiche", "url": l["url"]}]
     if modif:
         ligne1.append({"text": "🕘 Historique", "url": f"{BASE}/historique-{numero_fiche(l['url'])}.html"})
     lignes = [ligne1]
+
+    ligne2 = []
     if d and d.get("permis_url"):
-        lignes.append([{"text": "📋 Détail du permis", "url": d["permis_url"]}])
+        ligne2.append({"text": "📋 Détail du permis", "url": d["permis_url"]})
+    if d and d.get("agence_url"):
+        ligne2.append({"text": "🏢 Agence de l'architecte", "url": d["agence_url"]})
+    if ligne2:
+        lignes.append(ligne2)
+
+    # Raccourcis de recherche pour trouver le bureau d'études (BET)
+    nom = l["nom"].replace('"', "")
+    ville = re.sub(r"\s*\(\d{5}\)", "", l.get("ville", "")).strip()
+    lignes.append([
+        {"text": "🔎 Chercher le BET",
+         "url": recherche(f'"{nom}" {ville} "BET fluides" OR "bureau d\'études"')},
+        {"text": "🏛️ Marchés publics",
+         "url": recherche(f'"{nom}" {ville} site:boamp.fr')},
+    ])
     return lignes
 
 
@@ -336,11 +363,15 @@ def calibrer():
 def apercu(url, envoyer_tg=False):
     """Teste la lecture d'une fiche : python bot.py --apercu <url> [--envoyer]"""
     d = lire_fiche(url)
-    l = {"url": url, "nom": "(aperçu)", "ville": "", "fonction": ""}
+    l = {"url": url, "nom": d["nom"] or "(aperçu)", "ville": d["ville"], "fonction": ""}
     texte = construire_texte("🔎 APERÇU", l, "Projet retenu", d)
     print(re.sub(r"<[^>]+>", "", html.unescape(texte)))
     print("Photos trouvées :", [p[0] for p in d["photos"]])
     print("Lien permis :", d["permis_url"] or "-")
+    print("Agence de l'architecte :", d["agence_url"] or "-")
+    for rang in construire_boutons(l, d, True):
+        for b in rang:
+            print("  [%s] %s" % (b["text"], b["url"]))
     if envoyer_tg:
         envoyer(texte, construire_boutons(l, d, True), d["photos"])
         print("Aperçu envoyé sur Telegram.")
